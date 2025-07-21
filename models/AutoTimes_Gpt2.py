@@ -12,14 +12,14 @@ class Model(nn.Module):
         else:
             self.device = f"cuda:{configs.gpu}"
         print(self.device)
-        
-        self.gpt2 = GPT2Model.from_pretrained(configs.llm_ckp_dir) 
+
+        self.gpt2 = GPT2Model.from_pretrained(configs.llm_ckp_dir)
         self.hidden_dim_of_gpt2 = 768
         self.mix = configs.mix_embeds
 
         if self.mix:
             self.add_scale = nn.Parameter(torch.ones([]))
-        
+
         for name, param in self.gpt2.named_parameters():
             param.requires_grad = False
 
@@ -31,20 +31,20 @@ class Model(nn.Module):
         else:
             if not configs.use_multi_gpu or (configs.use_multi_gpu and configs.local_rank == 0):
                 print("use mlp as tokenizer and detokenizer")
-            self.encoder = MLP(self.token_len, self.hidden_dim_of_gpt2, 
-                            configs.mlp_hidden_dim, configs.mlp_hidden_layers, 
+            self.encoder = MLP(self.token_len, self.hidden_dim_of_gpt2,
+                            configs.mlp_hidden_dim, configs.mlp_hidden_layers,
                             configs.dropout, configs.mlp_activation)
             self.decoder = MLP(self.hidden_dim_of_gpt2, self.token_len,
                             configs.mlp_hidden_dim, configs.mlp_hidden_layers,
-                            configs.dropout, configs.mlp_activation) 
-    
+                            configs.dropout, configs.mlp_activation)
+
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
-        means = x_enc.mean(1, keepdim=True).detach()    
+        means = x_enc.mean(1, keepdim=True).detach()
         x_enc = x_enc - means
         stdev = torch.sqrt(
             torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5)
         x_enc /= stdev
-        
+
         bs, _, n_vars = x_enc.shape
         # x_enc: [bs x nvars x seq_len]
         x_enc = x_enc.permute(0, 2, 1)
@@ -56,8 +56,11 @@ class Model(nn.Module):
         # times_embeds: [bs * n_vars x token_num x hidden_dim_of_gpt2]
         times_embeds = self.encoder(fold_out)
         if self.mix:
-            times_embeds = times_embeds / times_embeds.norm(dim=2, keepdim=True)
-            x_mark_enc = x_mark_enc / x_mark_enc.norm(dim=2, keepdim=True)
+            eps = 1e-8  # 防止除零
+            times_embeds_norm = times_embeds.norm(dim=2, keepdim=True)
+            times_embeds = times_embeds / (times_embeds_norm + eps)
+            x_mark_enc_norm = x_mark_enc.norm(dim=2, keepdim=True)
+            x_mark_enc = x_mark_enc / (x_mark_enc_norm + eps)
             times_embeds = times_embeds + self.add_scale * x_mark_enc
         # outputs: [bs * n_vars x token_num x hidden_dim_of_gpt2]
         outputs = self.gpt2(
@@ -67,13 +70,13 @@ class Model(nn.Module):
         dec_out = dec_out.reshape(bs, n_vars, -1)
         # dec_out: [bs x token_num * token_len x n_vars]
         dec_out = dec_out.permute(0, 2, 1)
-        
+
         dec_out = dec_out * \
             (stdev[:, 0, :].unsqueeze(1).repeat(1, token_num * self.token_len, 1))
         dec_out = dec_out + \
             (means[:, 0, :].unsqueeze(1).repeat(1, token_num * self.token_len, 1))
-        
+
         return dec_out
-    
+
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         return self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
