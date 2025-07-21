@@ -44,8 +44,7 @@ scaler_y = MinMaxScaler()
 y_train_scaled = scaler_y.fit_transform(y_train)
 y_test_scaled = scaler_y.transform(y_test)
 
-def create_sequences_multi_step(X_data, y_data, window_size=10, pred_steps=96):
-
+def create_sequences_multi_step(X_data, y_data, window_size=576, pred_steps=96):
     sequences = []
     labels = []
     for i in range(len(X_data) - window_size - pred_steps + 1):
@@ -55,7 +54,7 @@ def create_sequences_multi_step(X_data, y_data, window_size=10, pred_steps=96):
         labels.append(y_seq)
     return np.array(sequences), np.array(labels)
 
-window_size = 10
+window_size = 576
 pred_steps = 96
 
 X_train_seq, y_train_seq = create_sequences_multi_step(
@@ -69,18 +68,15 @@ X_test_seq, y_test_seq = create_sequences_multi_step(
     pred_steps=pred_steps
 )
 
-
 print(f"训练输入形状：{X_train_seq.shape} → (样本数, 历史窗口长度, 特征数)")
 print(f"训练目标形状：{y_train_seq.shape} → (样本数, 预测步数, 目标数)")
 print(f"测试输入形状：{X_test_seq.shape}")
 print(f"测试目标形状：{y_test_seq.shape}")
 
-
 X_train_tensor = torch.FloatTensor(X_train_seq).to(device)
 y_train_tensor = torch.FloatTensor(y_train_seq).to(device)
 X_test_tensor = torch.FloatTensor(X_test_seq).to(device)
 y_test_tensor = torch.FloatTensor(y_test_seq).to(device)
-
 
 class MultiStepLSTM(nn.Module):
     def __init__(self, input_dim, hidden_dim=32, num_layers=2,
@@ -90,7 +86,6 @@ class MultiStepLSTM(nn.Module):
         self.num_layers = num_layers
         self.pred_steps = pred_steps
 
-
         self.lstm = nn.LSTM(
             input_size=input_dim,
             hidden_size=hidden_dim,
@@ -99,24 +94,16 @@ class MultiStepLSTM(nn.Module):
             batch_first=True
         )
 
-
         self.fc = nn.Linear(hidden_dim, pred_steps)
 
     def forward(self, x):
-
         batch_size = x.size(0)
-
         h0 = torch.zeros(self.num_layers, batch_size, self.hidden_dim).to(x.device)
         c0 = torch.zeros(self.num_layers, batch_size, self.hidden_dim).to(x.device)
-
         lstm_out, _ = self.lstm(x, (h0, c0))
         last_hidden = lstm_out[:, -1, :]
-
-
         output = self.fc(last_hidden)
-
         return output.unsqueeze(-1)
-
 
 model = MultiStepLSTM(
     input_dim=X_train_seq.shape[-1],
@@ -140,7 +127,7 @@ train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=32, shuffle
 # ====== 训练循环 ======
 best_test_r2 = -np.inf
 train_losses = []
-epochs = 50
+epochs = 10
 
 for epoch in range(epochs):
     model.train()
@@ -169,19 +156,20 @@ for epoch in range(epochs):
 
     print(f"Epoch {epoch + 1}/{epochs}")
     print(f"loss：{avg_train_loss:.6f} | R²：{test_r2:.4f}")
+
 # ====== 最终评估 ======
-model.load_state_dict(torch.load('best_multi_step_model.pth'))
+model.load_state_dict(torch.load('best_multi_step_model.pth', weights_only=True))
 model.eval()
 
 with torch.no_grad():
-
     final_pred = model(X_test_tensor).cpu().numpy()
     final_true = y_test_tensor.cpu().numpy()
 
+# Inverse transform to get original scale
 final_pred_original = scaler_y.inverse_transform(final_pred.reshape(-1, 1)).reshape(-1, pred_steps)
 final_true_original = scaler_y.inverse_transform(final_true.reshape(-1, 1)).reshape(-1, pred_steps)
 
-
+# Metrics calculation using original (non-normalized) data
 metrics = {
     "R²": r2_score(final_true_original.flatten(), final_pred_original.flatten()),
     "MSE": mean_squared_error(final_true_original.flatten(), final_pred_original.flatten()),
@@ -193,16 +181,13 @@ metrics = {
     )) * 100
 }
 
-print("\n===== result =====")
-print(f"MSE: {metrics['MSE']:.4f}")
-for name, value in metrics.items():
-    if name != 'MSE':
-        print(f"{name}: {value:.4f}{'%' if name == 'MAPE' else ''}")
-
+# Step-wise MSE using original data
 step_mse = []
 for step in range(pred_steps):
     step_pred = final_pred_original[:, step]
     step_true = final_true_original[:, step]
     step_mse.append(mean_squared_error(step_true, step_pred))
 
-
+# Print metrics
+print("Final Metrics (Original Scale):", metrics)
+print("Step-wise MSE (Original Scale):", step_mse)
